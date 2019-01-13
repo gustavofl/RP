@@ -11,22 +11,26 @@ import math
 import copy
 import random
 
-qnt_classes = 2
+from util import *
+
+qnt_classes = 8
 lista_rotulos = [random.randint(0,qnt_classes-1) for i in range(909)]
+limiar = 2
+k = 6
 
 # camadas de saida
-out1=3	
-out2=3
-out3=3
+out1=1
+out2=1
+out3=1
 
 # tamanho dos filtros
-f1=3
-f2=3
-f3=3
+f1=1
+f2=1
+f3=1
 
 # stride dos filtros
 s1 = 2
-s2 = 1
+s2 = 2
 s3 = 1
 
 # tamanho das matrizes MaxPolling
@@ -74,50 +78,32 @@ class Net(nn.Module):
 		self.fc2 = nn.Linear(tam_fc1, tam_fc2)
 		self.fc3 = nn.Linear(tam_fc2, tam_fc3)
 
-		self.saida_das_camadas = [None for i in range(9)]
+		self.camada_vetor_carac = []
+		self.camada_hash = []
 
 	def forward(self, x):
 
 		## CNN
 
 		x = F.relu(self.conv1(x))
-
-		self.saida_das_camadas[0] = x
-
 		x = F.max_pool2d(x,m1)
-
-		self.saida_das_camadas[1] = x
-
 		x = F.relu(self.conv2(x))
-
-		self.saida_das_camadas[2] = x
-
 		x = F.max_pool2d(x,m2)
-
-		self.saida_das_camadas[3] = x
-
 		x = F.relu(self.conv3(x))
-
-		self.saida_das_camadas[4] = x
-
 		x = F.max_pool2d(x,m3)
-
-		self.saida_das_camadas[5] = x
 
 		## FULLY CONNECTED
 
 		x = x.view(-1, self.num_flat_features(x))
 		x = F.relu(self.fc1(x))
 
-		self.saida_das_camadas[6] = x
+		self.camada_vetor_carac = x
 
 		x = torch.sigmoid(self.fc2(x))
 
-		self.saida_das_camadas[7] = x 
+		self.camada_hash = x 
 
 		x = F.relu(self.fc3(x))
-
-		self.saida_das_camadas[8] = x 
 
 		return x
 
@@ -149,6 +135,24 @@ class Net(nn.Module):
 		out_camada_3 = int(self.calcular_saida_camada_conv(out_camada_2, f3, s3)/float(m3))
 		return out_camada_3 * out_camada_3 * out3
 
+	def get_hash(self):
+		lista_hash = []
+		for instance in self.camada_hash:
+			lista = instance.data.tolist()
+			lista_hash.append([])
+			for output in lista:
+				if(output >= 0.5):
+					lista_hash[-1].append(1)
+				else:
+					lista_hash[-1].append(0)
+		return lista_hash
+
+	def get_vetor_carac(self):
+		lista_vetor_carac = []
+		for instance in self.camada_vetor_carac:
+			lista_vetor_carac.append(instance.data.tolist())
+		return lista_vetor_carac
+
 
 def carregar_imagens(path):
 	fileList = glob.glob(path)
@@ -156,6 +160,9 @@ def carregar_imagens(path):
 
 	for infile in fileList:
 		im = Image.open(infile)
+		# img = np.array(im)
+		# print(img[0][0])
+		# exit()
 		img_tensor = preprocess(im)
 		img_tensor.unsqueeze_(0)
 		tensorList.append(img_tensor)
@@ -168,9 +175,9 @@ def carregar_bases():
 	alta_qualidade = carregar_imagens("output/*.jpg")
 
 	particoes = {}
-	particoes['treino'] = {'imagens':[] , 'expected':[]}
-	particoes['teste'] = {'imagens':[] , 'expected':[]}
-	particoes['validacao'] = {'imagens':[] , 'expected':[]}
+	particoes['treino'] = {'imagens':[] , 'expected':[] , 'hash':[], 'vetor_carac':[]}
+	particoes['teste'] = {'imagens':[] , 'expected':[] , 'hash':[], 'vetor_carac':[]}
+	particoes['validacao'] = {'imagens':[] , 'expected':[] , 'hash':[], 'vetor_carac':[]}
 
 	# separar as imagens por rotulo
 	imagens_por_classe = [[] for i in range(qnt_classes)]
@@ -211,7 +218,7 @@ def carregar_bases():
 
 	# converter as listas em tensores
 	for part in particoes:
-		for lista in particoes[part]:
+		for lista in ('imagens','expected'):
 			particoes[part][lista] = torch.cat(particoes[part][lista], 0)
 
 	return particoes
@@ -288,13 +295,70 @@ def criar_cnn(particoes):
 	# return net,ultimaValidacao,[listaLoss,listaLossValid]
 	return melhor_cnn,melhor_loss,melhor_epoca,[listaLoss,listaLossValid]
 
+
+class Imagem():
+	def __init__(self, imagem, classe, img_hash, vetor_carac):
+		self.imagem = imagem
+		self.classe = classe
+		self.img_hash = img_hash
+		self.vetor_carac = vetor_carac
+		self.distancia = 0
+
+
 def testar_cnn(net, aprendizado, epoca, particoes):
-	output = net(particoes['teste']['imagens'])
-	loss = criterion(output, particoes['teste']['expected'])
-	print("\n>>> TESTE:",loss.data,"\n")
+	# calcular os hash e vetor de caracteristicas de todas as imagens
+	base_imagens = torch.cat([particoes['treino']['imagens'], particoes['validacao']['imagens']], 0)
+
+	base_classes = torch.cat([particoes['treino']['expected'], particoes['validacao']['expected']], 0)
+
+	net(base_imagens)
+
+	base_classes = base_classes.data.tolist()
+
+	base_hash = net.get_hash()
+
+	base_vetor_carac = net.get_vetor_carac()
+
+	base_treino = []
+	for i in range(len(base_imagens)):
+		base_treino.append(Imagem(base_imagens[i], base_classes[i], base_hash[i], base_vetor_carac[i]))
+
+	net(particoes['teste']['imagens'])
+
+	teste_hash = net.get_hash()
+
+	teste_vetor_carac = net.get_vetor_carac()
+
+	base_teste = []
+	for i in range(len(particoes['teste']['imagens'])):
+		base_teste.append(Imagem(particoes['teste']['imagens'][i], particoes['teste']['expected'][i], teste_hash[i], teste_vetor_carac[i]))
+
+	# for img in base_teste:
+	# 	proximos = get_proximos_limiar(base_treino, img, limiar)
+	# print(len(proximos))
+
+	proximos = get_proximos_limiar(base_treino, base_teste[0], limiar)
+
+	semelhantes = get_k_proximos(base_treino, base_teste[0], k)
 
 	plt.plot(aprendizado[0][:epoca])
 	plt.plot(aprendizado[1][:epoca])
+	plt.show()
+
+	img = base_teste[0].imagem
+	img = img[0,:]
+	img = img.detach().numpy()
+	plt.subplot2grid((1, 1), (0, 0)).imshow(img, cmap="gray")
+	plt.show()
+
+	for i in range(2):
+		for j in range(3):
+			ind_img = i*3+j
+
+			img = semelhantes[ind_img].imagem
+			img = img[0,:]
+			img = img.detach().numpy()
+			plt.subplot2grid((2, 3), (i, j)).imshow(img, cmap="gray")
 	plt.show()
 
 def main():
