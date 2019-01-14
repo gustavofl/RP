@@ -4,33 +4,31 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torchvision import transforms
 from PIL import Image
-import glob, os
+import glob
+import numpy
 import matplotlib.pyplot as plt
-import numpy as np
-import math
-import copy
-import random
 
 from util import *
+from kmeans import *
 
-qnt_classes = 8
-lista_rotulos = [random.randint(0,qnt_classes-1) for i in range(909)]
-limiar = 2
+qnt_classes = 3
+lista_rotulos = []
+limiar = 3
 k = 6
 
 # camadas de saida
-out1=1
-out2=1
-out3=1
+out1=3
+out2=8
+out3=11
 
 # tamanho dos filtros
-f1=1
-f2=1
-f3=1
+f1=4
+f2=4
+f3=4
 
 # stride dos filtros
-s1 = 2
-s2 = 2
+s1 = 1
+s2 = 1
 s3 = 1
 
 # tamanho das matrizes MaxPolling
@@ -39,12 +37,12 @@ m2=2
 m3=2
 
 # tamanho das camadas fully connected
-tam_fc1 = 90
-tam_fc2 = 25
+tam_fc1 = 200
+tam_fc2 = 20
 tam_fc3 = qnt_classes
 
 # tamanho da imagem na CNN
-tam_img=256
+tam_img=100
 
 # transformacoes que serao aplicadas as imagens
 normalize = transforms.Normalize(
@@ -72,6 +70,10 @@ class Net(nn.Module):
 		self.conv2 = nn.Conv2d(out1, out2, f2, s2)
 		self.conv3 = nn.Conv2d(out2, out3, f3, s3)
 
+		self.max1 = nn.MaxPool2d(m1)
+		self.max2 = nn.MaxPool2d(m2)
+		self.max3 = nn.MaxPool2d(m3)
+
 		# fully connected layers
 		saida_cnn = self.get_tam_saida_cnn()
 		self.fc1 = nn.Linear(saida_cnn, tam_fc1)
@@ -86,11 +88,11 @@ class Net(nn.Module):
 		## CNN
 
 		x = F.relu(self.conv1(x))
-		x = F.max_pool2d(x,m1)
+		x = self.max1(x)
 		x = F.relu(self.conv2(x))
-		x = F.max_pool2d(x,m2)
+		x = self.max2(x)
 		x = F.relu(self.conv3(x))
-		x = F.max_pool2d(x,m3)
+		x = self.max3(x)
 
 		## FULLY CONNECTED
 
@@ -154,15 +156,45 @@ class Net(nn.Module):
 		return lista_vetor_carac
 
 
-def carregar_imagens(path):
+class Imagem():
+	def __init__(self, imagem, classe, img_hash, vetor_carac):
+		self.imagem = imagem
+		self.classe = classe
+		self.img_hash = img_hash
+		self.vetor_carac = vetor_carac
+		self.distancia = 0
+
+
+def salvar_rotulos(lista):
+	arq = open('classes.data','w')
+
+	for r in lista:
+		arq.write(str(r)+'\n')
+
+	arq.close()
+
+def carregar_rotulos():
+	arq = open('classes.data','r')
+
+	linhas = arq.readlines()
+
+	arq.close()
+
+	rotulos = []
+
+	for l in linhas:
+		rotulos.append(int(l.replace('\n','')))
+
+	return rotulos
+
+def carregar_imagens_cnn(path):
 	fileList = glob.glob(path)
+	fileList.sort()
 	tensorList = []
 
 	for infile in fileList:
 		im = Image.open(infile)
-		# img = np.array(im)
-		# print(img[0][0])
-		# exit()
+		img = numpy.array(im)
 		img_tensor = preprocess(im)
 		img_tensor.unsqueeze_(0)
 		tensorList.append(img_tensor)
@@ -171,8 +203,8 @@ def carregar_imagens(path):
 
 def carregar_bases():
 	# carregando imagens
-	baixa_qualidade = carregar_imagens("input/*.jpg")
-	alta_qualidade = carregar_imagens("output/*.jpg")
+	baixa_qualidade = carregar_imagens_cnn("input/*.jpg")
+	alta_qualidade = carregar_imagens_cnn("output/*.jpg")
 
 	particoes = {}
 	particoes['treino'] = {'imagens':[] , 'expected':[] , 'hash':[], 'vetor_carac':[]}
@@ -223,25 +255,55 @@ def carregar_bases():
 
 	return particoes
 
-def criar_cnn(particoes):
-	net = Net()
-	print(net)
-	print('m1 =',m1,'; m2 =',m2,'m3 =',m3)
+def criar_cnn(particoes, net_dados=None):
+	if(net_dados == None):
+		net = Net()
+		print(net)
 
-	optimizer = optim.SGD(net.parameters(), lr=0.01)
+		optimizer = optim.SGD(net.parameters(), lr=0.01)
 
-	ultimaValidacao = 1
-	validacaoUnderFitting = 0.5
+		ultimaValidacao = 1
+		validacaoUnderFitting = 0.5
 
-	listaLoss = []
-	listaLossValid = []
+		listaLoss = []
+		listaLossValid = []
 
-	melhor_cnn = Net()
-	melhor_epoca = 1
-	melhor_loss = 0.5
+		melhor_cnn_dados = {'epoch':1,
+							'model_state_dict': None,
+							'optimizer_state_dict': None,
+							'loss': 0.5}
+		melhor_cnn = Net()
 
-	epoch = 0
-	while(True):
+		epoch = 0
+	else:
+		net = Net()
+		net.load_state_dict(net_dados['model_state_dict'])
+		print(net)
+
+		optimizer = optim.SGD(net.parameters(), lr=0.01)
+		optimizer.load_state_dict(net_dados['optimizer_state_dict'])
+
+		ultimaValidacao = net_dados['loss']
+		validacaoUnderFitting = net_dados['loss']+0.01
+
+		# listaLoss = net_dados['listaLoss']
+		# listaLossValid = net_dados['listaLossValid']
+
+		listaLoss = []
+		listaLossValid = []
+
+		melhor_cnn_dados = net_dados
+
+		melhor_cnn = net
+
+		epoch = net_dados['epoch']
+
+	# arq = open('continuar.data','r')
+	# continuar = int(arq.readline())
+	# arq.close()
+
+	# while(continuar):
+	for i in range(30):
 		optimizer.zero_grad()   # zero the gradient buffers
 
 		output = net(particoes['treino']['imagens'])
@@ -261,6 +323,8 @@ def criar_cnn(particoes):
 			print('over fitting')
 			# break
 
+		print('epoca=%d\t\tloss=%.7f\tvalidacao=%.7f\tDiferenca=%.7f' % ((epoch+1), valueLoss, valueValidLoss, (ultimaValidacao-valueLoss)))
+
 		ultimaValidacao = valueValidLoss
 
 		loss.backward()
@@ -275,37 +339,31 @@ def criar_cnn(particoes):
 				# break
 			validacaoUnderFitting = ultimaValidacao
 
-		if(ultimaValidacao < melhor_loss):
+		if(ultimaValidacao < melhor_cnn_dados['loss']):
+			melhor_cnn_dados['epoch'] = epoch
+			melhor_cnn_dados['model_state_dict'] = net.state_dict()
+			melhor_cnn_dados['optimizer_state_dict'] = optimizer.state_dict()
+			melhor_cnn_dados['loss'] = ultimaValidacao
 			melhor_cnn.load_state_dict(net.state_dict())
-			# melhor_cnn = copy.deepcopy(net)
-			melhor_loss = ultimaValidacao
-			melhor_epoca = epoch
 
-		print((epoch+1), ', loss=', valueLoss, ', validacao=', valueValidLoss)
-
-		arq = open('continuar.data','r')
-		continuar = int(arq.readline())
-		arq.close()
-
-		if(not continuar):
-			break
+		# arq = open('continuar.data','r')
+		# continuar = int(arq.readline())
+		# arq.close()
 
 		epoch += 1
 
-	# return net,ultimaValidacao,[listaLoss,listaLossValid]
-	return melhor_cnn,melhor_loss,melhor_epoca,[listaLoss,listaLossValid]
+	salvar = input('Salvar rede neural? (s/n) ')
+	if(salvar == 's'):
+		nome_arq = input('Digite o nome do arquivo: ')
+		melhor_cnn_dados['listaLoss'] = listaLoss
+		melhor_cnn_dados['listaLossValid'] = listaLossValid
+		torch.save(melhor_cnn_dados, nome_arq+'.pth')
 
+	return melhor_cnn,melhor_cnn_dados,[listaLoss,listaLossValid]
 
-class Imagem():
-	def __init__(self, imagem, classe, img_hash, vetor_carac):
-		self.imagem = imagem
-		self.classe = classe
-		self.img_hash = img_hash
-		self.vetor_carac = vetor_carac
-		self.distancia = 0
+def testar_cnn(net, aprendizado, net_dados, particoes):
+	epoca = net_dados['epoch']
 
-
-def testar_cnn(net, aprendizado, epoca, particoes):
 	# calcular os hash e vetor de caracteristicas de todas as imagens
 	base_imagens = torch.cat([particoes['treino']['imagens'], particoes['validacao']['imagens']], 0)
 
@@ -362,10 +420,25 @@ def testar_cnn(net, aprendizado, epoca, particoes):
 	plt.show()
 
 def main():
+	global lista_rotulos
+
+	###### PARA GERAR NOVOS ROTULOS
+	lista_rotulos = get_labels('output/*.jpg', 3)
+	salvar_rotulos(lista_rotulos)
+
+	###### PARA USAR ROTULOS GRAVADOS
+	# lista_rotulos = carregar_rotulos()
+
 	particoes = carregar_bases()
 
-	net,loss,epoca,aprendizado = criar_cnn(particoes)
+	###### CARREGAR REDE
+	# net_dados = torch.load('rede_240_1.pth')
 
-	testar_cnn(net, aprendizado, epoca, particoes)
+	###### INICIAR NOVA REDE
+	net_dados = None
+
+	net,net_dados,aprendizado = criar_cnn(particoes, net_dados)
+
+	testar_cnn(net, aprendizado, net_dados, particoes)
 
 main()
